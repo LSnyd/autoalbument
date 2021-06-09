@@ -7,6 +7,8 @@ import warnings
 
 import albumentations as A
 import torch
+import random
+import numpy as np
 from torch import nn
 from torch.autograd import Function
 from torch.distributions import RelaxedBernoulli
@@ -32,13 +34,13 @@ def ste(input_forward: torch.Tensor, input_backward: torch.Tensor):
 
 class Operation(nn.Module):
     def __init__(
-        self,
-        temperature: float = 0.1,
-        value_range=(0.0, 1.0),
-        has_magnitude=True,
-        is_spatial_level=False,
-        ste=False,
-        requires_uint8_scaling=False,
+            self,
+            temperature: float = 0.1,
+            value_range=(0.0, 1.0),
+            has_magnitude=True,
+            is_spatial_level=False,
+            ste=False,
+            requires_uint8_scaling=False,
     ):
 
         super().__init__()
@@ -169,7 +171,7 @@ class ShiftRGB(Operation):
 
 class RandomBrightness(Operation):
     def __init__(self, temperature):
-        super().__init__(temperature, value_range=(-1.0, 1.0))
+        super().__init__(temperature, value_range=(-0.35, 0.35))
 
     def apply_operation(self, input, value):
         return F.brightness_adjust(input, beta=value)
@@ -180,13 +182,70 @@ class RandomBrightness(Operation):
 
 class RandomContrast(Operation):
     def __init__(self, temperature):
-        super().__init__(temperature, value_range=(0.0, 10.0))
+        super().__init__(temperature, value_range=(0.0, 0.35))
 
     def apply_operation(self, input, value):
         return F.contrast_adjust(input, alpha=value)
 
     def as_transform(self, value, p):
         return A.RandomBrightnessContrast(brightness_limit=0, contrast_limit=(value, value), p=p)
+
+
+class GaussianBlur(Operation):
+    def __init__(self, temperature):
+        super().__init__(temperature, value_range=(3, 7))
+
+    def apply_operation(self, input, value):
+        return F.gaussian_blur(input)
+
+    def as_transform(self, value, p):
+        return A.GaussianBlur(blur_limit=(3, 3), p=p)
+
+
+def generate_sharpening_matrix(alpha_sample, lightness_sample):
+    matrix_nochange = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]], dtype=np.float32)
+    matrix_effect = np.array(
+        [[-1, -1, -1], [-1, 8 + lightness_sample, -1], [-1, -1, -1]],
+        dtype=np.float32,
+    )
+
+    matrix = (1 - alpha_sample) * matrix_nochange + alpha_sample * matrix_effect
+    return matrix
+
+
+class GaussNoise(Operation):
+    def __init__(self, temperature):
+        super().__init__(temperature, value_range=(0.05, 0.05))
+
+    def apply_operation(self, input, value):
+        return F.gauss_noise(input, gauss=value)
+
+    def as_transform(self, value, p):
+        return A.GaussNoise(var_limit=(value, value), p=p)
+
+
+class Sharpen(Operation):
+    def __init__(self, temperature):
+        super().__init__(temperature, value_range=(0.2, 0.8))
+
+    def __generate_sharpening_matrix(alpha_sample, lightness_sample):
+        matrix_nochange = np.array([[0, 0, 0], [0, 1, 0], [0, 0, 0]], dtype=np.float32)
+        matrix_effect = np.array(
+            [[-1, -1, -1], [-1, 8 + lightness_sample, -1], [-1, -1, -1]],
+            dtype=np.float32,
+        )
+
+        matrix = (1 - alpha_sample) * matrix_nochange + alpha_sample * matrix_effect
+        return matrix
+
+    def apply_operation(self, input, value):
+        alpha = value.data.cpu().numpy()
+        lightness = 0.5
+        sharpening_matrix = generate_sharpening_matrix(alpha_sample=alpha, lightness_sample=lightness)
+        return F.sharpen(input, sharpening_matrix)
+
+    def as_transform(self, value, p):
+        return A.IAASharpen(alpha=(value, value), lightness=(0.5, 0.5), p=p)
 
 
 class Solarize(Operation):
@@ -375,3 +434,4 @@ class CutoutFixedSize(Cutout):
             max_width=hole_size,
             p=p,
         )
+
