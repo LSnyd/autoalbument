@@ -1,4 +1,7 @@
 import torch
+import cv2
+import numpy as np
+from functools import wraps
 
 from autoalbument.albumentations_pytorch.affine import (
     get_rotation_matrix,
@@ -10,6 +13,63 @@ from autoalbument.albumentations_pytorch.utils import (
     TorchPadding,
     clipped,
 )
+
+
+def get_num_channels(image):
+    return image.shape[2] if len(image.shape) == 3 else 1
+
+
+def _maybe_process_in_chunks(process_fn, **kwargs):
+    """
+    Wrap OpenCV function to enable processing images with more than 4 channels.
+    Limitations:
+        This wrapper requires image to be the first argument and rest must be sent via named arguments.
+    Args:
+        process_fn: Transform function (e.g cv2.resize).
+        kwargs: Additional parameters.
+    Returns:
+        numpy.ndarray: Transformed image.
+    """
+
+    @wraps(process_fn)
+    def __process_fn(img):
+        device = img.device
+        img = img.data.cpu().numpy()
+        img = process_fn(img, **kwargs)
+        img = torch.tensor(img).to(device)  # .permute(2,0,1)
+        return img
+
+    return __process_fn
+
+
+@clipped
+def gaussian_blur(img_batch, gauss=0):
+    blur_fn = _maybe_process_in_chunks(cv2.GaussianBlur, ksize=(3, 3), sigmaX=gauss)
+
+    img_batch = img_batch.permute(0, 2, 3, 1)
+    batch_result = img_batch.detach().clone()
+
+    for idx, img in enumerate(img_batch):
+        batch_result[idx] = blur_fn(img)
+
+    return batch_result.permute(0, 3, 1, 2)
+
+
+@clipped
+def sharpen(img_batch, kernel):
+    img_batch = img_batch.permute(0, 2, 3, 1)
+    batch_result = img_batch.detach().clone()
+
+    conv_fn = _maybe_process_in_chunks(cv2.filter2D, ddepth=-1, kernel=kernel)
+    for idx, img in enumerate(img_batch):
+        batch_result[idx] = conv_fn(img)
+
+    return batch_result.permute(0, 3, 1, 2)
+
+
+@clipped
+def gauss_noise(img_batch, gauss):
+    return img_batch + gauss
 
 
 def solarize(img_batch, threshold):
@@ -35,6 +95,11 @@ def brightness_adjust(img_batch, beta):
 @clipped
 def contrast_adjust(img_batch, alpha):
     return img_batch * alpha
+
+
+@clipped
+def gaussian_blurr(img_batch, alpha):
+    return gaussian_filter(a, sigma=alpha)
 
 
 def vflip(img_batch):
@@ -81,3 +146,4 @@ def cutout(img_batch, num_holes, hole_size, fill_value=0):
         x2 = x1 + hole_size
         img_batch[:, :, y1:y2, x1:x2] = fill_value
     return img_batch
+
